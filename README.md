@@ -140,7 +140,7 @@ No dependencies; tests use the Node.js built-in runner and a mock token
 server:
 
 ```bash
-node --test tests/
+node --test
 ```
 
 ## Known limitations
