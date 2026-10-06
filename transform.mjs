@@ -1,77 +1,49 @@
 // Request and response transforms that make OpenCode's Anthropic traffic look
 // like a Claude Code session: the identity system block, Claude Code tool
 // names on the way out, and the original names on the way back.
-export const SYSTEM_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
+//
+// Argument translation (Claude Code argument shapes -> OpenCode schemas) is
+// table-driven in tools.mjs. It runs while the response is rewritten, before
+// OpenCode parses a tool call: the `input_json_delta` fragments of a mapped
+// tool are held until the block closes, translated as one JSON object, and
+// re-emitted as a single delta. When nothing changes, the original frames are
+// passed through byte for byte.
+import { createHash } from "node:crypto";
+import { TOOL_COMPAT, buildToolNameMaps, translateToolInput } from "./tools.mjs";
 
-// Canonical Claude Code tool names. OpenCode registers tools with lowercase
-// names, so requests are renamed to this casing and responses are renamed
-// back before OpenCode executes them.
-export const CC_TOOL_NAMES = [
-  "AskUserQuestion",
-  "Bash",
-  "Edit",
-  "EnterPlanMode",
-  "ExitPlanMode",
-  "Glob",
-  "Grep",
-  "KillShell",
-  "NotebookEdit",
-  "Read",
-  "Skill",
-  "Task",
-  "TaskOutput",
-  "TodoWrite",
-  "WebFetch",
-  "WebSearch",
-  "Write",
-];
+export { CC_TOOL_NAMES, TOOL_COMPAT, buildToolNameMaps, parseAliases, translateToolInput } from "./tools.mjs";
 
-// OpenCode tools whose names do not match the lowercase form of their Claude
-// Code counterpart.
-const DEFAULT_ALIASES = {
-  question: "AskUserQuestion",
-};
+// Current Claude Code identity line (2.1.x, Agent SDK wording). The 2025
+// wording is kept for routes that still expect it: select it with
+// ANTHROPIC_OAUTH_SYSTEM_IDENTITY or the plugin `identity` option.
+export const SYSTEM_IDENTITY = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
+export const LEGACY_SYSTEM_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
+const IDENTITY_PREFIXES = ["You are a Claude agent", "You are Claude Code"];
 
-export function parseAliases(value) {
-  if (!value) return {};
-  if (typeof value === "object") return value;
-  try {
-    const parsed = JSON.parse(value);
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
+// A stable, Claude-Code-shaped UUID for an OpenCode session. Claude Code
+// sends `x-claude-code-session-id: <uuid>`; deriving it from the OpenCode
+// session id keeps every request of one session correlated without
+// fabricating a device identity.
+export function sessionUUID(sessionID) {
+  const hash = createHash("sha1").update(`opencode-anthropic:${sessionID}`).digest("hex");
+  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${hash.slice(13, 16)}-a${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
 }
 
-export function buildToolNameMaps(aliases = {}) {
-  const forward = new Map(); // lowercase request name -> Claude Code name
-  const reverse = new Map(); // Claude Code name -> request name
-  for (const name of CC_TOOL_NAMES) {
-    forward.set(name.toLowerCase(), name);
-    reverse.set(name, name.toLowerCase());
-  }
-  for (const [from, to] of Object.entries({ ...DEFAULT_ALIASES, ...aliases })) {
-    if (typeof from !== "string" || typeof to !== "string" || !from || !to) continue;
-    forward.set(from.toLowerCase(), to);
-    reverse.set(to, from.toLowerCase());
-  }
-  return { forward, reverse };
+function isToolUseBlock(block) {
+  return Boolean(block) && typeof block === "object" && block.type === "tool_use";
 }
 
 function renameToolUseBlock(block, map) {
-  if (
-    block &&
-    typeof block === "object" &&
-    block.type === "tool_use" &&
-    typeof block.name === "string" &&
-    map.has(block.name)
-  ) {
+  if (isToolUseBlock(block) && typeof block.name === "string" && map.has(block.name)) {
     return { ...block, name: map.get(block.name) };
   }
   return block;
 }
 
-export function transformRequestBody(raw, { systemMode = "prepend", renameTools = true, forward } = {}) {
+export function transformRequestBody(
+  raw,
+  { systemMode = "prepend", renameTools = true, forward, identity = SYSTEM_IDENTITY } = {},
+) {
   let parsed;
   try {
     parsed = JSON.parse(raw);
@@ -79,23 +51,26 @@ export function transformRequestBody(raw, { systemMode = "prepend", renameTools 
     return raw;
   }
   const first = Array.isArray(parsed.system) ? parsed.system[0] : undefined;
-  const hasIdentity =
-    first && typeof first === "object" && typeof first.text === "string" && first.text.startsWith("You are Claude Code");
+  const firstText = first && typeof first === "object" && typeof first.text === "string" ? first.text : "";
+  const hasIdentity = IDENTITY_PREFIXES.some((prefix) => firstText.startsWith(prefix));
   if (!hasIdentity && systemMode !== "off") {
-    const identity = { type: "text", text: SYSTEM_IDENTITY };
+    const identityPart = { type: "text", text: identity };
     if (Array.isArray(parsed.system) && parsed.system.length > 0) {
       parsed.system =
         systemMode === "replace"
-          ? [{ ...parsed.system[0], text: SYSTEM_IDENTITY }, ...parsed.system.slice(1)]
-          : [identity, ...parsed.system];
+          ? [{ ...parsed.system[0], text: identity }, ...parsed.system.slice(1)]
+          : [identityPart, ...parsed.system];
     } else {
-      parsed.system = [identity];
+      parsed.system = [identityPart];
     }
   }
   if (renameTools) {
     const map = forward ?? buildToolNameMaps().forward;
     if (Array.isArray(parsed.tools)) {
-      parsed.tools = parsed.tools.map((tool) => ({ ...tool, name: map.get(String(tool?.name ?? "").toLowerCase()) ?? tool?.name }));
+      parsed.tools = parsed.tools.map((tool) => ({
+        ...tool,
+        name: map.get(String(tool?.name ?? "").toLowerCase()) ?? tool?.name,
+      }));
     }
     if (Array.isArray(parsed.messages)) {
       parsed.messages = parsed.messages.map((message) => {
@@ -107,63 +82,161 @@ export function transformRequestBody(raw, { systemMode = "prepend", renameTools 
   return JSON.stringify(parsed);
 }
 
-function renameToolUsePayload(parsed, reverse) {
-  if (!parsed || typeof parsed !== "object") return false;
-  let changed = false;
-  const rename = (block) => {
-    if (
-      block &&
-      typeof block === "object" &&
-      block.type === "tool_use" &&
-      typeof block.name === "string" &&
-      reverse.has(block.name)
-    ) {
-      block.name = reverse.get(block.name);
-      changed = true;
-    }
-  };
-  if (parsed.type === "content_block_start") rename(parsed.content_block);
-  if (Array.isArray(parsed.content)) parsed.content.forEach(rename);
-  if (parsed.message && Array.isArray(parsed.message.content)) parsed.message.content.forEach(rename);
-  return changed;
-}
+// The response rewriter is stateful: tool use blocks can be split across
+// frames, so argument translation has to remember what it has seen for each
+// content block index.
+export function createResponseRewriter({ reverse, translateInput = translateToolInput } = {}) {
+  const pending = new Map(); // content block index -> { name, frames, json }
 
-// Rewrites one complete SSE frame, or one non-streaming JSON body. Only
-// `tool_use` names are touched; tool arguments (`partial_json`), text, and
-// everything else are preserved byte for byte.
-export function rewriteEvent(eventText, reverse) {
-  let changed = false;
-  const lines = eventText.split("\n");
-  for (let index = 0; index < lines.length; index++) {
-    const line = lines[index];
-    if (!line.startsWith("data:")) continue;
-    const payload = line.slice(5).replace(/^ /, "");
-    if (!payload || payload === "[DONE]") continue;
-    let parsed;
-    try {
-      parsed = JSON.parse(payload);
-    } catch {
-      continue;
+  function rewriteToolBlocks(blocks) {
+    let changed = false;
+    for (const block of blocks) {
+      if (!isToolUseBlock(block)) continue;
+      if (typeof block.name === "string" && reverse?.has(block.name)) {
+        block.name = reverse.get(block.name);
+        changed = true;
+      }
+      const entry = TOOL_COMPAT[String(block.name ?? "").toLowerCase()];
+      if (
+        entry?.translate &&
+        block.input &&
+        typeof block.input === "object" &&
+        Object.keys(block.input).length > 0
+      ) {
+        const mapped = translateInput(block.name, block.input);
+        if (JSON.stringify(mapped) !== JSON.stringify(block.input)) {
+          block.input = mapped;
+          changed = true;
+        }
+      }
     }
-    if (!renameToolUsePayload(parsed, reverse)) continue;
-    changed = true;
-    lines[index] = `data: ${JSON.stringify(parsed)}`;
+    return changed;
   }
-  if (changed) return lines.join("\n");
-  if (!eventText.includes("data:")) {
-    const trimmed = eventText.trim();
-    if (trimmed.startsWith("{")) {
+
+  function rewriteBody(parsed) {
+    let changed = false;
+    if (Array.isArray(parsed?.content)) changed = rewriteToolBlocks(parsed.content) || changed;
+    if (parsed?.message && Array.isArray(parsed.message.content)) {
+      changed = rewriteToolBlocks(parsed.message.content) || changed;
+    }
+    return changed;
+  }
+
+  // Returns a list of frames to emit (empty list = suppress this frame).
+  function rewriteFrame(frame) {
+    if (!frame.includes("data:")) {
+      const trimmed = frame.trim();
+      if (trimmed.startsWith("{")) {
+        try {
+          const parsed = JSON.parse(trimmed);
+          if (rewriteBody(parsed)) return [JSON.stringify(parsed)];
+        } catch {}
+      }
+      return [frame];
+    }
+
+    const lines = frame.split("\n");
+    const emitted = [];
+    let changed = false;
+    let suppress = false;
+    for (let index = 0; index < lines.length; index++) {
+      const line = lines[index];
+      if (!line.startsWith("data:")) continue;
+      const payload = line.slice(5).replace(/^ /, "");
+      if (!payload || payload === "[DONE]") continue;
+      let parsed;
       try {
-        const parsed = JSON.parse(trimmed);
-        if (renameToolUsePayload(parsed, reverse)) return JSON.stringify(parsed);
-      } catch {}
+        parsed = JSON.parse(payload);
+      } catch {
+        continue;
+      }
+
+      if (parsed?.type === "content_block_start" && parsed.content_block) {
+        const blockChanged = rewriteToolBlocks([parsed.content_block]);
+        const block = parsed.content_block;
+        if (isToolUseBlock(block)) {
+          const entry = TOOL_COMPAT[String(block.name ?? "").toLowerCase()];
+          if (entry?.translate) {
+            pending.set(parsed.index, { name: String(block.name).toLowerCase(), frames: [], json: [] });
+          }
+        }
+        if (blockChanged) {
+          lines[index] = `data: ${JSON.stringify(parsed)}`;
+          changed = true;
+        }
+        continue;
+      }
+
+      if (parsed?.type === "content_block_delta" && parsed.delta?.type === "input_json_delta") {
+        const state = pending.get(parsed.index);
+        if (state) {
+          state.frames.push(frame);
+          state.json.push(String(parsed.delta.partial_json ?? ""));
+          suppress = true;
+          continue;
+        }
+      }
+
+      if (parsed?.type === "content_block_stop" && pending.has(parsed.index)) {
+        const state = pending.get(parsed.index);
+        pending.delete(parsed.index);
+        const frames = [];
+        let synthesized = null;
+        if (state.json.length > 0) {
+          try {
+            const input = JSON.parse(state.json.join(""));
+            const mapped = translateInput(state.name, input);
+            if (JSON.stringify(mapped) !== JSON.stringify(input)) {
+              synthesized = `event: content_block_delta\ndata: ${JSON.stringify({
+                type: "content_block_delta",
+                index: parsed.index,
+                delta: { type: "input_json_delta", partial_json: JSON.stringify(mapped) },
+              })}\n\n`;
+            }
+          } catch {}
+        }
+        if (synthesized) frames.push(synthesized);
+        else frames.push(...state.frames);
+        frames.push(frame);
+        return frames;
+      }
+
+      if (rewriteBody(parsed)) {
+        lines[index] = `data: ${JSON.stringify(parsed)}`;
+        changed = true;
+      }
     }
+
+    if (suppress) return [];
+    return changed ? [lines.join("\n")] : [frame];
   }
-  return eventText;
+
+  return {
+    rewriteFrame,
+    // Emit anything still buffered for a truncated stream, so a missing
+    // content_block_stop can never swallow tool arguments.
+    flush() {
+      const frames = [];
+      for (const state of pending.values()) frames.push(...state.frames);
+      pending.clear();
+      return frames;
+    },
+  };
 }
 
-export function transformResponseStream(response, reverse) {
+// Rewrites one complete SSE frame, or one non-streaming JSON body, touching
+// only `tool_use` names. Kept for callers that only need name mapping.
+export function rewriteEvent(eventText, reverse) {
+  const rewriter = createResponseRewriter({
+    reverse,
+    translateInput: (_name, input) => input,
+  });
+  return rewriter.rewriteFrame(eventText).join("");
+}
+
+export function transformResponseStream(response, options = {}) {
   if (!response.body) return response;
+  const rewriter = createResponseRewriter(options);
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
@@ -175,15 +248,18 @@ export function transformResponseStream(response, reverse) {
         if (boundary !== -1) {
           const frame = buffer.slice(0, boundary + 2);
           buffer = buffer.slice(boundary + 2);
-          controller.enqueue(encoder.encode(rewriteEvent(frame, reverse)));
-          return;
+          const pieces = rewriter.rewriteFrame(frame);
+          for (const piece of pieces) controller.enqueue(encoder.encode(piece));
+          if (pieces.length > 0) return;
+          continue; // suppressed frame: keep draining instead of stalling
         }
         const { done, value } = await reader.read();
         if (done) {
           if (buffer) {
-            controller.enqueue(encoder.encode(rewriteEvent(buffer, reverse)));
+            for (const piece of rewriter.rewriteFrame(buffer)) controller.enqueue(encoder.encode(piece));
             buffer = "";
           }
+          for (const piece of rewriter.flush()) controller.enqueue(encoder.encode(piece));
           controller.close();
           return;
         }

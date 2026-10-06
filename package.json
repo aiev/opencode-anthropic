@@ -27,13 +27,16 @@
     "index.js",
     "oauth.mjs",
     "transform.mjs",
+    "tools.mjs",
+    "retry.mjs",
     "login.mjs",
     "tests",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "capture": "node scripts/claude-capture.mjs"
   },
   "engines": {
     "node": ">=20"

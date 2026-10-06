@@ -11,10 +11,18 @@
 //   connection. API keys and logged-out states pass through untouched.
 // - Cached tokens are bound to the connection id they were issued for, so a
 //   logout or an account switch can never revive an old session from disk.
-import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { BETA_FLAGS, TOKENS_FILE, USER_AGENT, refreshTokens } from "./oauth.mjs";
-import { buildToolNameMaps, parseAliases, transformRequestBody, transformResponseStream } from "./transform.mjs";
+import {
+  buildToolNameMaps,
+  parseAliases,
+  sessionUUID,
+  transformRequestBody,
+  transformResponseStream,
+  translateToolInput,
+} from "./transform.mjs";
+import { createRateLimitState } from "./retry.mjs";
 
 const REFRESH_BUFFER_MS = 10 * 60 * 1000;
 const REFRESH_RETRY_MS = 5 * 60 * 1000;
@@ -54,18 +62,26 @@ export default {
     const options = {
       systemMode: ctx.options?.systemMode ?? process.env.ANTHROPIC_OAUTH_SYSTEM_MODE ?? "prepend",
       renameTools: ctx.options?.renameTools ?? process.env.ANTHROPIC_OAUTH_RENAME_TOOLS !== "0",
+      identity: ctx.options?.identity ?? process.env.ANTHROPIC_OAUTH_SYSTEM_IDENTITY,
       toolAliases: {
         ...parseAliases(process.env.ANTHROPIC_OAUTH_TOOL_ALIASES),
         ...(ctx.options?.toolAliases ?? {}),
       },
     };
     const { forward, reverse } = buildToolNameMaps(options.toolAliases);
-    const requestOptions = { systemMode: options.systemMode, renameTools: options.renameTools, forward };
+    const requestOptions = {
+      systemMode: options.systemMode,
+      renameTools: options.renameTools,
+      identity: options.identity,
+      forward,
+    };
 
     let cached = null;
     let cachedAt = 0;
     let refreshPromise = null;
     let refreshFailedAt = 0;
+    const rateLimit = createRateLimitState();
+    const dumpFile = process.env.ANTHROPIC_OAUTH_DUMP;
 
     async function activeOAuthConnection() {
       try {
@@ -171,6 +187,7 @@ export default {
             .filter(Boolean);
           const required = BETA_FLAGS.split(",").map((flag) => flag.trim());
           headers.set("anthropic-beta", [...new Set([...required, ...incoming])].join(","));
+          if (event.sessionID) headers.set("x-claude-code-session-id", sessionUUID(event.sessionID));
 
           if ((options.systemMode !== "off" || options.renameTools) && event.request.body) {
             const raw = await event.request.clone().text();
@@ -182,6 +199,20 @@ export default {
                 body: transformed,
                 signal: event.request.signal,
               });
+            }
+            if (dumpFile) {
+              let body = transformed;
+              try {
+                body = JSON.parse(transformed);
+              } catch {}
+              try {
+                appendFileSync(
+                  dumpFile,
+                  `${JSON.stringify({ at: new Date().toISOString(), kind: event.kind, url: event.request.url, body })}\n`,
+                );
+              } catch (error) {
+                console.error("opencode-anthropic: failed to write ANTHROPIC_OAUTH_DUMP:", error);
+              }
             }
           }
         } catch (error) {
@@ -197,13 +228,48 @@ export default {
       "http.response",
       (event) => {
         try {
+          rateLimit.note(event.response);
           if (!options.renameTools || !event.response.ok || !event.response.body) return;
-          event.response = transformResponseStream(event.response, reverse);
+          event.response = transformResponseStream(event.response, { reverse, translateInput: translateToolInput });
         } catch (error) {
           console.error("opencode-anthropic: response hook failed:", error);
         }
       },
       { providerID: "anthropic" },
     );
+
+    // Let OpenCode retry a rate-limited request using Anthropic's own
+    // `retry-after` hint instead of its default backoff.
+    try {
+      await ctx.session.hook(
+        "retry",
+        (event) => {
+          try {
+            const delay = rateLimit.delayMsFor(event?.error?.status);
+            if (delay === null) return;
+            event.decision = { retry: true, delay };
+          } catch (error) {
+            console.error("opencode-anthropic: retry hook failed:", error);
+          }
+        },
+        { providerID: "anthropic" },
+      );
+    } catch (error) {
+      console.warn("opencode-anthropic: retry hook unavailable in this OpenCode build:", error?.message ?? error);
+    }
+
+    // Translate Claude Code argument shapes (file_path, old_string, ...)
+    // back onto OpenCode's tool schemas before execution.
+    try {
+      await ctx.tool.hook("execute.before", (event) => {
+        try {
+          event.input = translateToolInput(event.tool, event.input);
+        } catch (error) {
+          console.error("opencode-anthropic: tool hook failed:", error);
+        }
+      });
+    } catch (error) {
+      console.warn("opencode-anthropic: tool hook unavailable in this OpenCode build:", error?.message ?? error);
+    }
   },
 };

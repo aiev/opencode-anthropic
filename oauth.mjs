@@ -17,7 +17,7 @@ const CLI_VERSION = process.env.ANTHROPIC_CLI_VERSION || "2.1.289";
 export const USER_AGENT = process.env.ANTHROPIC_USER_AGENT || `claude-cli/${CLI_VERSION} (external, cli)`;
 export const BETA_FLAGS =
   process.env.ANTHROPIC_BETA_FLAGS ||
-  "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05";
+  "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05";
 
 const DATA_DIR = process.env.XDG_DATA_HOME ? join(process.env.XDG_DATA_HOME, "opencode") : join(homedir(), ".local", "share", "opencode");
 export const TOKENS_FILE = join(DATA_DIR, "opencode-anthropic.json");
