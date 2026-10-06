@@ -1,0 +1,41 @@
+{
+  "name": "@aiev/opencode-anthropic",
+  "version": "0.1.0",
+  "description": "OpenCode V2 plugin that restores Claude Pro/Max OAuth for the Anthropic provider",
+  "type": "module",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "anthropic",
+    "claude",
+    "oauth"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aiev/opencode-anthropic.git"
+  },
+  "license": "MIT",
+  "exports": {
+    ".": {
+      "import": "./index.js"
+    }
+  },
+  "bin": {
+    "opencode-anthropic": "./login.mjs"
+  },
+  "files": [
+    "index.js",
+    "oauth.mjs",
+    "transform.mjs",
+    "login.mjs",
+    "tests",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test tests/"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
