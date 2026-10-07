@@ -40,8 +40,20 @@ It is a V2 port of the community
 
 ## Install
 
-Point the OpenCode config at a checkout of this repository (global config
-example, `~/.config/opencode/opencode.json`):
+From npm, add the package to the OpenCode config:
+
+```jsonc
+{
+  "plugins": [
+    "opencode-anthropic"
+  ]
+}
+```
+
+Or use the CLI: `opencode plugin add opencode-anthropic`.
+
+For a local checkout, point the config at the directory instead (global
+config example, `~/.config/opencode/opencode.json`):
 
 ```jsonc
 {
