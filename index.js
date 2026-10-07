@@ -13,7 +13,7 @@
 //   logout or an account switch can never revive an old session from disk.
 import { appendFileSync, chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { BETA_FLAGS, TOKENS_FILE, USER_AGENT, refreshTokens } from "./oauth.mjs";
+import { BETA_FLAGS, TOKENS_FILE, USER_AGENT, createAuthorizationRequest, exchangeCodeForTokens, refreshTokens } from "./oauth.mjs";
 import {
   buildToolNameMaps,
   parseAliases,
@@ -270,6 +270,49 @@ export default {
       });
     } catch (error) {
       console.warn("opencode-anthropic: tool hook unavailable in this OpenCode build:", error?.message ?? error);
+    }
+
+    // Register Claude Pro/Max as a native OAuth method so the regular
+    // /connect flow works. The CLI login script stays as a fallback.
+    try {
+      await ctx.integration.transform((editor) => {
+        editor.method.update({
+          integrationID: "anthropic",
+          method: { id: "claude-pro-max", type: "oauth", label: "Claude Pro/Max" },
+          authorize: async () => {
+            const { url, verifier } = createAuthorizationRequest();
+            return {
+              mode: "code",
+              url,
+              instructions: "Authorize in your browser, then paste the code Claude shows.",
+              callback: async (code) => {
+                const tokens = await exchangeCodeForTokens(code, verifier);
+                return {
+                  type: "oauth",
+                  methodID: "claude-pro-max",
+                  access: tokens.access,
+                  refresh: tokens.refresh,
+                  expires: tokens.expires,
+                };
+              },
+            };
+          },
+          refresh: async (credential) => {
+            const tokens = await refreshTokens(credential.refresh);
+            return {
+              ...credential,
+              access: tokens.access,
+              refresh: tokens.refresh,
+              expires: tokens.expires,
+            };
+          },
+        });
+      });
+    } catch (error) {
+      console.warn(
+        "opencode-anthropic: could not register the native OAuth method; /connect will not show Claude Pro/Max. Use the login script instead:",
+        error?.message ?? error,
+      );
     }
   },
 };

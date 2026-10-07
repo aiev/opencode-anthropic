@@ -50,6 +50,7 @@ function makeContext({ connection = null, credential = null, options = {}, store
   const storage = new Map();
   if (stored) storage.set("tokens", stored);
   const hooks = new Map();
+  const registrations = [];
   const state = { connection, credential };
   const ctx = {
     options,
@@ -61,6 +62,10 @@ function makeContext({ connection = null, credential = null, options = {}, store
       connection: {
         active: async () => state.connection,
         resolve: async () => state.credential,
+      },
+      transform: async (callback) => {
+        callback({ method: { update: (input) => registrations.push(input) } });
+        return { dispose: async () => {} };
       },
     },
     session: {
@@ -83,6 +88,7 @@ function makeContext({ connection = null, credential = null, options = {}, store
     ctx,
     state,
     storage,
+    registrations,
     async request(body) {
       const event = {
         sessionID: "ses_test",
@@ -489,4 +495,37 @@ test("translates Claude Code arguments through the tool hook", async () => {
   await plugin.setup(fake.ctx);
   assert.deepEqual(await fake.toolBefore("read", { file_path: "/x" }), { path: "/x" });
   assert.deepEqual(await fake.toolBefore("read", { path: "/x" }), { path: "/x" });
+});
+
+test("registers Claude Pro/Max as a native OAuth method for /connect", async () => {
+  tokenMode = "rotate";
+  tokenRequests = [];
+  const fake = makeContext({ connection: null, credential: null });
+  await plugin.setup(fake.ctx);
+  const registration = fake.registrations.find(
+    (item) => item.integrationID === "anthropic" && item.method?.type === "oauth",
+  );
+  assert.ok(registration, "OAuth method registered");
+  assert.equal(registration.method.id, "claude-pro-max");
+  assert.equal(registration.method.label, "Claude Pro/Max");
+
+  const authorization = await registration.authorize({});
+  assert.equal(authorization.mode, "code");
+  assert.match(authorization.url, /^https:\/\/claude\.ai\/oauth\/authorize\?/);
+  assert.match(authorization.url, /client_id=9d1c250a/);
+  assert.equal(typeof authorization.callback, "function", "code mode exposes a callback that receives the pasted code");
+
+  const before = tokenRequests.length;
+  const credential = await authorization.callback("test-code#test-state");
+  assert.equal(tokenRequests.length, before + 1, "code exchanged with the token endpoint");
+  assert.match(tokenRequests.at(-1), /grant_type=authorization_code/);
+  assert.equal(credential.type, "oauth");
+  assert.equal(credential.methodID, "claude-pro-max");
+  assert.match(credential.access, /^access-/);
+  assert.match(credential.refresh, /^refresh-/);
+  assert.ok(credential.expires > Date.now());
+
+  const refreshed = await registration.refresh({ ...credential });
+  assert.match(refreshed.access, /^access-/);
+  assert.equal(refreshed.methodID, "claude-pro-max", "credential metadata preserved on refresh");
 });

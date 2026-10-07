@@ -51,6 +51,17 @@ changing plugins: `opencode service restart`.
 
 ## Login
 
+Use the regular OpenCode connect flow:
+
+```
+/connect → Anthropic → Claude Pro/Max
+```
+
+The plugin registers that method on the Anthropic integration: it opens the
+claude.ai authorization page, asks for the code Claude shows, exchanges it,
+and lets OpenCode store the credential. The bundled script does the same from
+a terminal (useful for headless machines and CI):
+
 ```bash
 node login.mjs            # from a checkout
 # or, when installed from npm:
@@ -91,6 +102,9 @@ token automatically.
   mapped tools. Argument fragments are held until the content block closes;
   when nothing changes the original frames are passed through byte for byte,
   and unparseable fragments fall back untouched.
+- **Native `/connect`.** The plugin registers "Claude Pro/Max" as an OAuth
+  method on the Anthropic integration, so the normal connect UI (and the
+  integration OAuth API) works without the CLI script.
 - **Rate limits.** A 429/503/529 response records Anthropic's `retry-after`
   value; the session `retry` hook hands it back as the retry delay instead of
   letting OpenCode hammer the endpoint.
@@ -191,9 +205,9 @@ JSONL written by `ANTHROPIC_OAUTH_DUMP`).
 
 ## Known limitations
 
-- OpenCode's native `/connect` flow has no Anthropic OAuth method and the
-  claude.ai client id/endpoints are no longer present in the OpenCode binary,
-  so the bundled `login.mjs` script is the supported login path.
+- The native `/connect` OAuth method is registered by this plugin; if the
+  registration fails (older OpenCode builds), `/connect` will not show
+  "Claude Pro/Max" and the bundled `login.mjs` script remains the fallback.
 - The plugin targets a Claude Code compatibility profile
   (`claude-cli/2.1.289`). Newer releases can be selected with
   `ANTHROPIC_CLI_VERSION`, but the beta flags and tool list may need updating.
