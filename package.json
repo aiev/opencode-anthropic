@@ -24,7 +24,7 @@
     }
   },
   "bin": {
-    "opencode-anthropic": "./login.mjs"
+    "opencode-anthropic": "login.mjs"
   },
   "files": [
     "index.js",
