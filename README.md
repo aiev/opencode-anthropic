@@ -23,16 +23,20 @@ It is a V2 port of the community
 [`opencode-anthropic-oauth`](https://www.npmjs.com/package/opencode-anthropic-oauth)
 (MIT) plugin, which only runs on OpenCode V1.
 
-> **Warning:** Anthropic's Terms of Service (Feb 2026) say OAuth tokens from
-> Free/Pro/Max plans must only be used by official clients. This plugin is a
-> community workaround: it can stop working without notice and you use it at
-> your own risk (there are reports of banned accounts).
+> **Warning:** Anthropic's Terms of Service say OAuth tokens from Free/Pro/Max
+> plans must only be used by official clients. Since April 2026, third-party
+> apps authenticated this way are metered against a separate prepaid **extra
+> usage** balance (claude.ai/settings/usage) instead of the plan limits, and
+> requests are blocked while that balance is empty. This plugin is a community
+> workaround: it can stop working without notice and you use it at your own
+> risk.
 
 ## Requirements
 
 - OpenCode V2 (tested with 2.0.22);
 - Node.js 20+ (for the login script and tests);
-- A Claude Pro/Max subscription.
+- A Claude Pro/Max subscription with an extra-usage balance, or an Anthropic
+  API key (API keys pass through the plugin untouched).
 
 ## Install
 
@@ -225,6 +229,9 @@ JSONL written by `ANTHROPIC_OAUTH_DUMP`).
 
 ## Known limitations
 
+- Subscription OAuth usage is billed by Anthropic from the prepaid "extra
+  usage" balance (per-token) rather than the plan limits. The plugin cannot
+  change which pool a request is metered from; API keys are unaffected.
 - The native `/connect` OAuth method is registered by this plugin; if the
   registration fails (older OpenCode builds), `/connect` will not show
   "Claude Pro/Max" and the bundled `login.mjs` script remains the fallback.
