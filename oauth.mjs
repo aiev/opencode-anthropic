@@ -14,13 +14,38 @@ const SCOPES =
 // The Claude Code profile this plugin targets. Override with
 // ANTHROPIC_CLI_VERSION when a newer release needs different headers.
 const CLI_VERSION = process.env.ANTHROPIC_CLI_VERSION || "2.1.289";
-export const USER_AGENT = process.env.ANTHROPIC_USER_AGENT || `claude-cli/${CLI_VERSION} (external, cli)`;
+const CLI_BUILD = process.env.ANTHROPIC_CLI_BUILD || "45c";
+export const CLI_ENTRYPOINT = process.env.ANTHROPIC_CLI_ENTRYPOINT || "cli";
+export const USER_AGENT = process.env.ANTHROPIC_USER_AGENT || `claude-cli/${CLI_VERSION} (external, ${CLI_ENTRYPOINT})`;
+// First system block of a Claude Code request, as captured from 2.1.289.
+export const BILLING_HEADER =
+  process.env.ANTHROPIC_BILLING_HEADER ||
+  `x-anthropic-billing-header: cc_version=${CLI_VERSION}.${CLI_BUILD}; cc_entrypoint=${CLI_ENTRYPOINT};`;
+// Anthropic SDK telemetry headers, as captured from Claude Code 2.1.289.
+export const SDK_HEADERS = {
+  "x-stainless-arch": process.arch === "x64" ? "x64" : process.arch,
+  "x-stainless-lang": "js",
+  "x-stainless-os":
+    process.platform === "linux"
+      ? "Linux"
+      : process.platform === "darwin"
+        ? "MacOS"
+        : process.platform === "win32"
+          ? "Windows"
+          : process.platform,
+  "x-stainless-package-version": process.env.ANTHROPIC_SDK_VERSION || "0.128.0",
+  "x-stainless-retry-count": "0",
+  "x-stainless-runtime": "node",
+  "x-stainless-runtime-version": process.env.ANTHROPIC_NODE_VERSION || "v26.3.0",
+  "x-stainless-timeout": "600",
+};
 export const BETA_FLAGS =
   process.env.ANTHROPIC_BETA_FLAGS ||
   "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05";
 
 const DATA_DIR = process.env.XDG_DATA_HOME ? join(process.env.XDG_DATA_HOME, "opencode") : join(homedir(), ".local", "share", "opencode");
 export const TOKENS_FILE = join(DATA_DIR, "opencode-anthropic.json");
+export const DEVICE_FILE = join(DATA_DIR, "opencode-anthropic-device.json");
 
 function base64url(buffer) {
   return buffer.toString("base64url").replace(/=+$/, "");

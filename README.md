@@ -9,8 +9,10 @@ the plumbing is still there: OAuth credentials are stored and sent as
 
 - keeps Claude tokens fresh (refresh 10 minutes before expiry, single-flight,
   with backoff and a cross-process fallback);
-- sends the current Claude Code signature: identity system block, `user-agent`,
-  `x-app`, `x-claude-code-session-id`, and the 2.1.289 beta flags;
+- mirrors the captured Claude Code 2.1.289 request profile: billing-header
+  system block, identity block, `metadata.user_id` (persistent random device
+  id), thinking enabled with `display: omitted`, `context_management`, SDK
+  telemetry headers, `x-claude-code-session-id`, and the matching beta flags;
 - exposes OpenCode tools under Claude Code names (`shell` → `Bash`, `subagent`
   → `Agent`, ...) and translates Claude Code argument shapes (`file_path`,
   `old_string`, `run_in_background`) back onto OpenCode schemas before they are
@@ -93,10 +95,18 @@ token automatically.
   token is used instead of failing the request.
 - **Request shaping.** `http.request` hook (provider `anthropic`): replaces
   the authorization header with a fresh bearer token, removes `x-api-key`,
-  sets `user-agent: claude-cli/<version> (external, cli)`, `x-app: cli`,
-  `x-claude-code-session-id` (a stable UUID per OpenCode session),
-  `anthropic-dangerous-direct-browser-access: true`, and merges the
-  `anthropic-beta` flags.
+  sets `user-agent: claude-cli/<version> (external, <entrypoint>)`,
+  `x-app: cli`, `x-claude-code-session-id` (a stable UUID per OpenCode
+  session), `anthropic-dangerous-direct-browser-access: true`, the
+  `x-stainless-*` telemetry headers and `accept: application/json`, and merges
+  the `anthropic-beta` flags.
+- **Claude Code request profile.** The body is shaped like the captured
+  Claude Code 2.1.289 request: the billing-header line becomes `system[0]`,
+  the identity becomes `system[1]`, `metadata.user_id` carries a persistent
+  random device id plus the session id, and thinking-capable primary requests
+  get `thinking: { type: "enabled", budget_tokens: max_tokens - 1,
+  display: "omitted" }` with `context_management.edits` to match. Each piece is
+  individually switchable (see Configuration).
 - **Response shaping.** `http.response` hook: parses SSE events, renames
   `tool_use.name` back to the OpenCode name, and translates the arguments of
   mapped tools. Argument fragments are held until the content block closes;
@@ -111,11 +121,12 @@ token automatically.
 
 ### System prompt and tools
 
-The default `prepend` mode adds the current Claude Code identity ("You are a
-Claude agent, built on Anthropic's Claude Agent SDK.") as the first `system`
-block and keeps the OpenCode prompt right after it. Set
-`ANTHROPIC_OAUTH_SYSTEM_IDENTITY` (or the `identity` option) to pin the 2025
-wording or your own string.
+The default `prepend` mode builds the system array like Claude Code does: the
+billing-header line (`x-anthropic-billing-header: cc_version=2.1.289.45c;
+cc_entrypoint=cli;`) as the first block, then the identity ("You are a Claude
+agent, built on Anthropic's Claude Agent SDK."), then the OpenCode prompt.
+Set `ANTHROPIC_OAUTH_SYSTEM_IDENTITY` (or the `identity` option) to pin the
+2025 wording or your own string.
 
 `tools.mjs` holds an explicit compatibility table: only OpenCode tools with a
 Claude Code counterpart are renamed, and each mapped tool also translates the
@@ -163,14 +174,23 @@ Options can be passed through the OpenCode config:
 | --- | --- | --- |
 | `systemMode` | `prepend` | `prepend`, `replace` (rewrites the first block), or `off` |
 | `identity` | current Claude Code line | Overrides the injected identity string |
+| `billingHeader` | `true` | Prepend the Claude Code billing-header system block |
+| `metadata` | `true` | Send `metadata.user_id` with a persistent random device id |
+| `thinking` | `true` | Add Claude Code thinking and `context_management` to primary Claude requests |
+| `sdkHeaders` | `true` | Send the `x-stainless-*` telemetry headers |
 | `renameTools` | `true` | Rename tools to Claude Code casing and back |
 | `toolAliases` | `{}` | Extra or overriding tool-name mappings |
 
 Environment variables (useful when the plugin is loaded as a directory):
 `ANTHROPIC_OAUTH_SYSTEM_MODE`, `ANTHROPIC_OAUTH_SYSTEM_IDENTITY`,
+`ANTHROPIC_OAUTH_BILLING_HEADER=0`, `ANTHROPIC_OAUTH_METADATA=0`,
+`ANTHROPIC_OAUTH_THINKING=0`, `ANTHROPIC_OAUTH_SDK_HEADERS=0`,
 `ANTHROPIC_OAUTH_RENAME_TOOLS=0`, `ANTHROPIC_OAUTH_TOOL_ALIASES` (JSON),
 `ANTHROPIC_OAUTH_DUMP` (append every transformed OAuth request to a JSONL
-file), `ANTHROPIC_CLI_VERSION`, `ANTHROPIC_BETA_FLAGS`, `XDG_DATA_HOME`.
+file), `ANTHROPIC_CLI_VERSION`, `ANTHROPIC_CLI_BUILD`,
+`ANTHROPIC_CLI_ENTRYPOINT`, `ANTHROPIC_BILLING_HEADER` (full line override),
+`ANTHROPIC_SDK_VERSION`, `ANTHROPIC_NODE_VERSION`, `ANTHROPIC_BETA_FLAGS`,
+`XDG_DATA_HOME`.
 
 ## Troubleshooting
 
@@ -211,13 +231,16 @@ JSONL written by `ANTHROPIC_OAUTH_DUMP`).
 - The plugin targets a Claude Code compatibility profile
   (`claude-cli/2.1.289`). Newer releases can be selected with
   `ANTHROPIC_CLI_VERSION`, but the beta flags and tool list may need updating.
-- Claude Code enables extended thinking by default
-  (`thinking: { type: "enabled", budget_tokens: max_tokens - 1 }`); this
-  plugin does not force it and keeps whatever OpenCode decides. The
-  interleaved-thinking and thinking-token-count betas are always sent.
-- The plugin deliberately does not fabricate account metadata
-  (`x-anthropic-billing-header`, `metadata.user_id` device ids): it aligns
-  client behaviour, not identity.
+- Thinking is enabled by default for `claude-sonnet-*`/`claude-opus-*`
+  primary requests, mirroring Claude Code (`budget_tokens: max_tokens - 1`,
+  `display: "omitted"`). Disable with `ANTHROPIC_OAUTH_THINKING=0` or the
+  `thinking` option to keep OpenCode's own behaviour.
+- The billing header mirrors the captured 2.1.289 line, which has no `cch`
+  hash; newer Claude Code builds may include one this plugin cannot compute.
+- The full Claude Code system prompt and tool descriptions are not copied
+  (they are Anthropic's content and change every release): OpenCode's prompt
+  and schemas are sent with the identity/billing prefix instead. The device id
+  is a random per-install id, not a Claude Code install id.
 - Refreshed tokens are kept in plugin storage and in the token file; OpenCode's
   stored credential keeps the original access token until the next login.
 

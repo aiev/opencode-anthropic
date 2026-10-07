@@ -40,9 +40,43 @@ function renameToolUseBlock(block, map) {
   return block;
 }
 
+function shapeSystem(parsed, { systemMode, identity, billing }) {
+  const blocks = Array.isArray(parsed.system) ? parsed.system : [];
+  if (blocks.length === 0 && (!billing || systemMode === "off")) return blocks;
+  const first = blocks[0];
+  const firstText = first && typeof first === "object" && typeof first.text === "string" ? first.text : "";
+  const secondText =
+    firstText.startsWith("x-anthropic-billing-header") &&
+    blocks[1] &&
+    typeof blocks[1] === "object" &&
+    typeof blocks[1].text === "string"
+      ? blocks[1].text
+      : "";
+  const hasIdentity = IDENTITY_PREFIXES.some(
+    (prefix) => firstText.startsWith(prefix) || secondText.startsWith(prefix),
+  );
+  const prefix = [];
+  if (billing && systemMode !== "off") prefix.push({ type: "text", text: billing });
+  if (systemMode !== "off" && !hasIdentity) {
+    if (systemMode === "replace" && blocks.length > 0) {
+      return [...prefix, { ...blocks[0], text: identity }, ...blocks.slice(1)];
+    }
+    prefix.push({ type: "text", text: identity });
+  }
+  return [...prefix, ...blocks];
+}
+
 export function transformRequestBody(
   raw,
-  { systemMode = "prepend", renameTools = true, forward, identity = SYSTEM_IDENTITY } = {},
+  {
+    systemMode = "prepend",
+    renameTools = true,
+    forward,
+    identity = SYSTEM_IDENTITY,
+    billing = null,
+    metadataUserId = null,
+    thinking = true,
+  } = {},
 ) {
   let parsed;
   try {
@@ -50,20 +84,27 @@ export function transformRequestBody(
   } catch {
     return raw;
   }
-  const first = Array.isArray(parsed.system) ? parsed.system[0] : undefined;
-  const firstText = first && typeof first === "object" && typeof first.text === "string" ? first.text : "";
-  const hasIdentity = IDENTITY_PREFIXES.some((prefix) => firstText.startsWith(prefix));
-  if (!hasIdentity && systemMode !== "off") {
-    const identityPart = { type: "text", text: identity };
-    if (Array.isArray(parsed.system) && parsed.system.length > 0) {
-      parsed.system =
-        systemMode === "replace"
-          ? [{ ...parsed.system[0], text: identity }, ...parsed.system.slice(1)]
-          : [identityPart, ...parsed.system];
-    } else {
-      parsed.system = [identityPart];
+  const shaped = shapeSystem(parsed, { systemMode, identity, billing });
+  if (shaped.length > 0 || Array.isArray(parsed.system)) parsed.system = shaped;
+
+  if (metadataUserId && !parsed.metadata?.user_id) {
+    parsed.metadata = { ...parsed.metadata, user_id: metadataUserId };
+  }
+
+  const claudeModel = /claude-(sonnet|opus)/i.test(String(parsed.model ?? ""));
+  if (thinking && claudeModel) {
+    if (
+      parsed.thinking === undefined &&
+      typeof parsed.max_tokens === "number" &&
+      parsed.max_tokens > 1024
+    ) {
+      parsed.thinking = { type: "enabled", budget_tokens: parsed.max_tokens - 1, display: "omitted" };
+    }
+    if (parsed.context_management === undefined && parsed.thinking !== undefined) {
+      parsed.context_management = { edits: [{ type: "clear_thinking_20251015", keep: "all" }] };
     }
   }
+
   if (renameTools) {
     const map = forward ?? buildToolNameMaps().forward;
     if (Array.isArray(parsed.tools)) {

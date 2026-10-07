@@ -89,10 +89,10 @@ function makeContext({ connection = null, credential = null, options = {}, store
     state,
     storage,
     registrations,
-    async request(body) {
+    async request(body, kind = "primary") {
       const event = {
         sessionID: "ses_test",
-        kind: "primary",
+        kind,
         request: new Request("https://api.anthropic.com/v1/messages", {
           method: "POST",
           headers: { "content-type": "application/json", "x-api-key": "must-be-removed" },
@@ -174,8 +174,9 @@ test("refreshes expired OAuth tokens, transforms the request, and caches the res
   assert.match(request.headers.get("anthropic-beta"), /claude-code-20250219/);
 
   const parsed = JSON.parse(await request.text());
-  assert.equal(parsed.system[0].text, SYSTEM_IDENTITY, "identity prepended");
-  assert.equal(parsed.system[1].text, "You are an AI agent running in OpenCode", "original prompt kept");
+  assert.match(parsed.system[0].text, /^x-anthropic-billing-header: cc_version=/, "billing header first");
+  assert.equal(parsed.system[1].text, SYSTEM_IDENTITY, "identity prepended");
+  assert.equal(parsed.system[2].text, "You are an AI agent running in OpenCode", "original prompt kept");
   assert.deepEqual(
     parsed.tools.map((tool) => tool.name),
     ["Read", "TodoWrite", "compress", "AskUserQuestion", "Bash", "Agent"],
@@ -375,9 +376,10 @@ test("supports replace and off system modes", async () => {
   });
   await plugin.setup(replaceFake.ctx);
   const replaced = JSON.parse(await (await replaceFake.request(sampleBody())).text());
-  assert.equal(replaced.system[0].text, SYSTEM_IDENTITY);
-  assert.equal(replaced.system[0].cache_control.type, "ephemeral", "first block metadata kept");
-  assert.equal(replaced.system.length, 1, "single system block");
+  assert.match(replaced.system[0].text, /^x-anthropic-billing-header:/);
+  assert.equal(replaced.system[1].text, SYSTEM_IDENTITY);
+  assert.equal(replaced.system[1].cache_control.type, "ephemeral", "first block metadata kept");
+  assert.equal(replaced.system.length, 2, "billing header plus the replaced block");
 
   const offFake = makeContext({
     connection: oauthConnection("cred_modes"),
@@ -495,6 +497,48 @@ test("translates Claude Code arguments through the tool hook", async () => {
   await plugin.setup(fake.ctx);
   assert.deepEqual(await fake.toolBefore("read", { file_path: "/x" }), { path: "/x" });
   assert.deepEqual(await fake.toolBefore("read", { path: "/x" }), { path: "/x" });
+});
+
+test("mirrors Claude Code metadata, thinking and SDK headers", async () => {
+  const fresh = { ...expiredOAuth, access: "fresh", expires: Date.now() + 3600_000 };
+  const fake = makeContext({ connection: oauthConnection("cred_cc"), credential: fresh });
+  await plugin.setup(fake.ctx);
+  const request = await fake.request({ ...sampleBody(), max_tokens: 64000 });
+  assert.equal(request.headers.get("accept"), "application/json");
+  assert.equal(request.headers.get("x-stainless-package-version"), "0.128.0");
+  assert.equal(request.headers.get("x-stainless-runtime-version"), "v26.3.0");
+  const parsed = JSON.parse(await request.text());
+  assert.match(parsed.system[0].text, /^x-anthropic-billing-header: cc_version=2\.1\.289\.45c; cc_entrypoint=cli;$/);
+  const user = JSON.parse(parsed.metadata.user_id);
+  assert.match(user.device_id, /^[0-9a-f]{64}$/);
+  assert.equal(user.account_uuid, "");
+  assert.equal(user.session_id, sessionUUID("ses_test"));
+  assert.deepEqual(parsed.thinking, { type: "enabled", budget_tokens: 63999, display: "omitted" });
+  assert.deepEqual(parsed.context_management, { edits: [{ type: "clear_thinking_20251015", keep: "all" }] });
+});
+
+test("leaves thinking alone for non-thinking models and non-primary flows", async () => {
+  const fresh = { ...expiredOAuth, access: "fresh", expires: Date.now() + 3600_000 };
+  const haiku = makeContext({ connection: oauthConnection("cred_h"), credential: fresh });
+  await plugin.setup(haiku.ctx);
+  const haikuBody = JSON.parse(
+    await (await haiku.request({ ...sampleBody(), model: "claude-haiku-4-5", max_tokens: 32000 })).text(),
+  );
+  assert.equal(haikuBody.thinking, undefined, "no thinking for haiku");
+
+  const title = makeContext({ connection: oauthConnection("cred_t"), credential: fresh });
+  await plugin.setup(title.ctx);
+  const titleBody = JSON.parse(await (await title.request({ ...sampleBody(), max_tokens: 64000 }, "title")).text());
+  assert.equal(titleBody.thinking, undefined, "no thinking for title requests");
+
+  const existing = makeContext({ connection: oauthConnection("cred_e"), credential: fresh });
+  await plugin.setup(existing.ctx);
+  const existingBody = JSON.parse(
+    await (
+      await existing.request({ ...sampleBody(), max_tokens: 64000, thinking: { type: "enabled", budget_tokens: 5000 } })
+    ).text(),
+  );
+  assert.deepEqual(existingBody.thinking, { type: "enabled", budget_tokens: 5000 }, "existing thinking config preserved");
 });
 
 test("registers Claude Pro/Max as a native OAuth method for /connect", async () => {

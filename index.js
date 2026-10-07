@@ -11,9 +11,20 @@
 //   connection. API keys and logged-out states pass through untouched.
 // - Cached tokens are bound to the connection id they were issued for, so a
 //   logout or an account switch can never revive an old session from disk.
+import { randomBytes } from "node:crypto";
 import { appendFileSync, chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { BETA_FLAGS, TOKENS_FILE, USER_AGENT, createAuthorizationRequest, exchangeCodeForTokens, refreshTokens } from "./oauth.mjs";
+import {
+  BETA_FLAGS,
+  BILLING_HEADER,
+  DEVICE_FILE,
+  SDK_HEADERS,
+  TOKENS_FILE,
+  USER_AGENT,
+  createAuthorizationRequest,
+  exchangeCodeForTokens,
+  refreshTokens,
+} from "./oauth.mjs";
 import {
   buildToolNameMaps,
   parseAliases,
@@ -63,6 +74,10 @@ export default {
       systemMode: ctx.options?.systemMode ?? process.env.ANTHROPIC_OAUTH_SYSTEM_MODE ?? "prepend",
       renameTools: ctx.options?.renameTools ?? process.env.ANTHROPIC_OAUTH_RENAME_TOOLS !== "0",
       identity: ctx.options?.identity ?? process.env.ANTHROPIC_OAUTH_SYSTEM_IDENTITY,
+      billingHeader: ctx.options?.billingHeader ?? process.env.ANTHROPIC_OAUTH_BILLING_HEADER !== "0",
+      metadata: ctx.options?.metadata ?? process.env.ANTHROPIC_OAUTH_METADATA !== "0",
+      thinking: ctx.options?.thinking ?? process.env.ANTHROPIC_OAUTH_THINKING !== "0",
+      sdkHeaders: ctx.options?.sdkHeaders ?? process.env.ANTHROPIC_OAUTH_SDK_HEADERS !== "0",
       toolAliases: {
         ...parseAliases(process.env.ANTHROPIC_OAUTH_TOOL_ALIASES),
         ...(ctx.options?.toolAliases ?? {}),
@@ -73,6 +88,7 @@ export default {
       systemMode: options.systemMode,
       renameTools: options.renameTools,
       identity: options.identity,
+      billing: options.billingHeader ? BILLING_HEADER : null,
       forward,
     };
 
@@ -82,6 +98,34 @@ export default {
     let refreshFailedAt = 0;
     const rateLimit = createRateLimitState();
     const dumpFile = process.env.ANTHROPIC_OAUTH_DUMP;
+
+    let device = null;
+    async function deviceID() {
+      if (device) return device;
+      try {
+        const stored = await ctx.storage.get("device");
+        if (stored && /^[0-9a-f]{64}$/.test(String(stored.id))) return (device = stored.id);
+      } catch (error) {
+        console.error("opencode-anthropic: failed to read the device id from plugin storage:", error);
+      }
+      try {
+        const file = JSON.parse(readFileSync(DEVICE_FILE, "utf8"));
+        if (file && /^[0-9a-f]{64}$/.test(String(file.id))) return (device = file.id);
+      } catch {}
+      device = randomBytes(32).toString("hex");
+      try {
+        await ctx.storage.set("device", { id: device });
+      } catch (error) {
+        console.error("opencode-anthropic: failed to persist the device id in plugin storage:", error);
+      }
+      try {
+        mkdirSync(dirname(DEVICE_FILE), { recursive: true });
+        writeFileSync(DEVICE_FILE, JSON.stringify({ id: device }, null, 2), { mode: 0o600 });
+      } catch (error) {
+        console.error("opencode-anthropic: failed to persist the device id on disk:", error);
+      }
+      return device;
+    }
 
     async function activeOAuthConnection() {
       try {
@@ -188,10 +232,28 @@ export default {
           const required = BETA_FLAGS.split(",").map((flag) => flag.trim());
           headers.set("anthropic-beta", [...new Set([...required, ...incoming])].join(","));
           if (event.sessionID) headers.set("x-claude-code-session-id", sessionUUID(event.sessionID));
+          if (options.sdkHeaders) {
+            headers.set("accept", "application/json");
+            for (const [name, value] of Object.entries(SDK_HEADERS)) headers.set(name, value);
+          }
 
-          if ((options.systemMode !== "off" || options.renameTools) && event.request.body) {
+          const shapesBody =
+            options.systemMode !== "off" || options.renameTools || options.metadata || options.thinking;
+          if (shapesBody && event.request.body) {
             const raw = await event.request.clone().text();
-            const transformed = transformRequestBody(raw, requestOptions);
+            const metadataUserId =
+              options.metadata && event.sessionID
+                ? JSON.stringify({
+                    device_id: await deviceID(),
+                    account_uuid: "",
+                    session_id: sessionUUID(event.sessionID),
+                  })
+                : null;
+            const transformed = transformRequestBody(raw, {
+              ...requestOptions,
+              metadataUserId,
+              thinking: options.thinking && event.kind === "primary",
+            });
             if (transformed !== raw) {
               event.request = new Request(event.request.url, {
                 method: event.request.method,
